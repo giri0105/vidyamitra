@@ -153,3 +153,7 @@ mockmate/
 ## License
 
 This project is for educational and demonstration purposes.
+
+
+Team
+FiveStar — Built for the GenAI Forge Hackathon 2026
