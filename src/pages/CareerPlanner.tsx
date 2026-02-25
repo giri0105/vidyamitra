@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Layout from '@/components/Layout';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -8,12 +8,13 @@ import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
-import { careerPlanApi } from '@/lib/api';
+import { careerPlanApi, roadmapChartApi } from '@/lib/api';
 import { toast } from 'sonner';
 import { motion } from 'framer-motion';
+import mermaid from 'mermaid';
 import {
     Route, BookOpen, Play, Calendar, Target, Clock, Award, ExternalLink,
-    ChevronDown, ChevronUp, Sparkles, Image as ImageIcon, XCircle, Plus, Download
+    ChevronDown, ChevronUp, Sparkles, Image as ImageIcon, XCircle, Plus, Download, GitBranch, FileImage, FileCode
 } from 'lucide-react';
 
 const JOB_ROLES = [
@@ -36,7 +37,33 @@ const CareerPlanner = () => {
     const [expandedWeek, setExpandedWeek] = useState<number | null>(0);
     const [savedPlans, setSavedPlans] = useState<any[]>([]);
 
+    // Mermaid roadmap chart state
+    const [timeline, setTimeline] = useState('3 months');
+    const [mermaidCode, setMermaidCode] = useState('');
+    const [mermaidSvg, setMermaidSvg] = useState('');
+    const [mermaidLoading, setMermaidLoading] = useState(false);
+    const [mermaidError, setMermaidError] = useState('');
+    const mermaidRef = useRef<HTMLDivElement>(null);
+    const mermaidIdCounter = useRef(0);
+
     const effectiveRole = targetRole === 'Other' ? customRole : targetRole;
+
+    // Initialize mermaid
+    useEffect(() => {
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'default',
+            securityLevel: 'loose',
+            flowchart: {
+                useMaxWidth: false,
+                htmlLabels: true,
+                curve: 'basis',
+                nodeSpacing: 30,
+                rankSpacing: 60,
+                padding: 15,
+            },
+        });
+    }, []);
 
     useEffect(() => {
         const loadPlans = async () => {
@@ -60,6 +87,178 @@ const CareerPlanner = () => {
             setSkillInput('');
         }
     };
+
+    // Render mermaid code to SVG whenever mermaidCode changes
+    useEffect(() => {
+        if (!mermaidCode) { setMermaidSvg(''); return; }
+        const renderMermaid = async () => {
+            try {
+                mermaidIdCounter.current += 1;
+                const id = `mermaid-chart-${mermaidIdCounter.current}`;
+                const { svg } = await mermaid.render(id, mermaidCode);
+                setMermaidSvg(svg);
+                setMermaidError('');
+            } catch (err: any) {
+                console.error('Mermaid render error:', err);
+                setMermaidError('Failed to render flowchart. Retrying with simplified code...');
+                // Attempt a simple cleanup and retry
+                try {
+                    const cleaned = mermaidCode
+                        .split('\n')
+                        .filter(line => !line.includes(':::') && !line.includes('class '))
+                        .join('\n');
+                    mermaidIdCounter.current += 1;
+                    const id2 = `mermaid-chart-${mermaidIdCounter.current}`;
+                    const { svg } = await mermaid.render(id2, cleaned);
+                    setMermaidSvg(svg);
+                    setMermaidError('');
+                } catch {
+                    setMermaidSvg('');
+                    setMermaidError('Could not render the flowchart. The AI response may contain invalid syntax.');
+                }
+            }
+        };
+        renderMermaid();
+    }, [mermaidCode]);
+
+    // Generate Mermaid flowchart
+    const generateFlowchart = useCallback(async () => {
+        if (!effectiveRole) { toast.error('Select a target role'); return; }
+        setMermaidLoading(true);
+        setMermaidError('');
+        setMermaidCode('');
+        setMermaidSvg('');
+        toast.info('Generating flowchart roadmap...');
+
+        try {
+            const data = await roadmapChartApi.generate({
+                targetRole: effectiveRole,
+                timeline,
+                currentSkills: skillGaps.length > 0 ? skillGaps.join(', ') : undefined,
+                skillsToLearn: effectiveRole,
+            });
+            if (data.success && data.mermaidCode) {
+                setMermaidCode(data.mermaidCode);
+                toast.success('Flowchart roadmap generated!');
+            } else {
+                setMermaidError(data.error || 'Failed to generate flowchart');
+                toast.error(data.error || 'Failed to generate flowchart');
+            }
+        } catch (err: any) {
+            setMermaidError(err.message || 'Failed to generate flowchart');
+            toast.error(err.message || 'Failed to generate flowchart');
+        } finally {
+            setMermaidLoading(false);
+        }
+    }, [effectiveRole, timeline, skillGaps]);
+
+    // Helper: get a clean, self-contained SVG string from the rendered element
+    const getCleanSvg = useCallback((): string | null => {
+        const svgEl = mermaidRef.current?.querySelector('svg');
+        if (!svgEl) return null;
+
+        // Clone so we don't mutate the DOM
+        const clone = svgEl.cloneNode(true) as SVGSVGElement;
+        // Ensure proper namespace
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+
+        // Inline all computed styles into the SVG so it renders standalone
+        const styleSheets = document.styleSheets;
+        let cssText = '';
+        try {
+            for (let i = 0; i < styleSheets.length; i++) {
+                try {
+                    const rules = styleSheets[i].cssRules;
+                    for (let j = 0; j < rules.length; j++) {
+                        cssText += rules[j].cssText + '\n';
+                    }
+                } catch { /* cross-origin stylesheet, skip */ }
+            }
+        } catch { /* ignore */ }
+
+        // Add a <defs><style> block with all CSS
+        const defs = clone.querySelector('defs') || document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+        const styleEl = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+        styleEl.textContent = cssText;
+        defs.insertBefore(styleEl, defs.firstChild);
+        if (!clone.querySelector('defs')) clone.insertBefore(defs, clone.firstChild);
+
+        // Set explicit dimensions from viewBox so the SVG has a size when opened standalone
+        const bbox = svgEl.getBBox();
+        const width = svgEl.getAttribute('width') || String(bbox.width + 40);
+        const height = svgEl.getAttribute('height') || String(bbox.height + 40);
+        clone.setAttribute('width', width);
+        clone.setAttribute('height', height);
+
+        return new XMLSerializer().serializeToString(clone);
+    }, []);
+
+    // Download as PNG
+    const downloadPNG = useCallback(() => {
+        if (!mermaidSvg) return;
+        try {
+            const svgData = getCleanSvg();
+            if (!svgData) return;
+
+            const svgEl = mermaidRef.current?.querySelector('svg');
+            if (!svgEl) return;
+            const bbox = svgEl.getBBox();
+            const w = parseFloat(svgEl.getAttribute('width') || String(bbox.width + 40));
+            const h = parseFloat(svgEl.getAttribute('height') || String(bbox.height + 40));
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            const scale = 2;
+            canvas.width = w * scale;
+            canvas.height = h * scale;
+            ctx.scale(scale, scale);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+
+            const img = new Image();
+            img.onload = () => {
+                ctx.drawImage(img, 0, 0, w, h);
+                const pngUrl = canvas.toDataURL('image/png');
+                const link = document.createElement('a');
+                link.href = pngUrl;
+                link.download = `roadmap-${effectiveRole.replace(/[^a-zA-Z0-9]/g, '-')}.png`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                toast.success('PNG downloaded!');
+            };
+            img.onerror = () => toast.error('Failed to render PNG');
+            img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+        } catch (err) {
+            console.error('PNG download error:', err);
+            toast.error('Failed to download PNG');
+        }
+    }, [mermaidSvg, effectiveRole, getCleanSvg]);
+
+    // Download as SVG
+    const downloadSVG = useCallback(() => {
+        if (!mermaidSvg) return;
+        try {
+            const svgData = getCleanSvg();
+            if (!svgData) return;
+            const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `roadmap-${effectiveRole.replace(/[^a-zA-Z0-9]/g, '-')}.svg`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            toast.success('SVG downloaded!');
+        } catch (err) {
+            console.error('SVG download error:', err);
+            toast.error('Failed to download SVG');
+        }
+    }, [mermaidSvg, effectiveRole, getCleanSvg]);
 
     const generatePlan = async () => {
         if (!effectiveRole) { toast.error('Select a target role'); return; }
@@ -100,6 +299,17 @@ const CareerPlanner = () => {
                                     </SelectContent>
                                 </Select>
                             </div>
+                            <div>
+                                <Label>Timeline</Label>
+                                <Select value={timeline} onValueChange={setTimeline}>
+                                    <SelectTrigger><SelectValue placeholder="Select timeline..." /></SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="1 month">1 Month</SelectItem>
+                                        <SelectItem value="3 months">3 Months</SelectItem>
+                                        <SelectItem value="6 months">6 Months</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
                             {targetRole === 'Other' && (
                                 <div><Label>Custom Role</Label><Input value={customRole} onChange={e => setCustomRole(e.target.value)} placeholder="Your target role" /></div>
                             )}
@@ -121,10 +331,16 @@ const CareerPlanner = () => {
                             </div>
                         </div>
 
-                        <Button onClick={generatePlan} disabled={loading || !effectiveRole}
-                            className="bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700">
-                            {loading ? 'Generating...' : <><Sparkles className="h-4 w-4 mr-2" />Generate Roadmap</>}
-                        </Button>
+                        <div className="flex flex-wrap gap-3">
+                            <Button onClick={generatePlan} disabled={loading || !effectiveRole}
+                                className="bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700">
+                                {loading ? 'Generating...' : <><Sparkles className="h-4 w-4 mr-2" />Generate Roadmap</>}
+                            </Button>
+                            <Button onClick={generateFlowchart} disabled={mermaidLoading || !effectiveRole}
+                                variant="outline" className="border-emerald-500/50 text-emerald-600 hover:bg-emerald-500/10">
+                                {mermaidLoading ? 'Generating...' : <><GitBranch className="h-4 w-4 mr-2" />Generate Flowchart</>}
+                            </Button>
+                        </div>
                     </CardContent>
                 </Card>
 
@@ -135,6 +351,56 @@ const CareerPlanner = () => {
                             <Progress value={60} className="mt-3" />
                         </CardContent>
                     </Card>
+                )}
+
+                {mermaidLoading && (
+                    <Card className="border-emerald-500/20 bg-emerald-500/5">
+                        <CardContent className="pt-6">
+                            <p className="text-sm font-medium flex items-center gap-2"><GitBranch className="h-4 w-4 animate-pulse text-emerald-500" />Generating flowchart roadmap with Groq AI...</p>
+                            <Progress value={50} className="mt-3" />
+                        </CardContent>
+                    </Card>
+                )}
+
+                {/* Mermaid Flowchart Section */}
+                {(mermaidSvg || mermaidError) && (
+                    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                        <Card className="border-emerald-500/30 overflow-hidden">
+                            <CardHeader className="bg-gradient-to-r from-emerald-500/10 to-teal-500/10">
+                                <div className="flex items-center justify-between flex-wrap gap-2">
+                                    <div>
+                                        <CardTitle className="flex items-center gap-2"><GitBranch className="h-5 w-5 text-emerald-500" />Interactive Flowchart Roadmap</CardTitle>
+                                        <CardDescription>AI-generated learning path flowchart for {effectiveRole} • {timeline}</CardDescription>
+                                    </div>
+                                    {mermaidSvg && (
+                                        <div className="flex gap-2">
+                                            <Button size="sm" variant="outline" onClick={downloadPNG} className="gap-1.5 text-xs">
+                                                <FileImage className="h-3.5 w-3.5" /> PNG
+                                            </Button>
+                                            <Button size="sm" variant="outline" onClick={downloadSVG} className="gap-1.5 text-xs">
+                                                <FileCode className="h-3.5 w-3.5" /> SVG
+                                            </Button>
+                                        </div>
+                                    )}
+                                </div>
+                            </CardHeader>
+                            <CardContent className="pt-6">
+                                {mermaidError && (
+                                    <div className="p-4 rounded-lg bg-destructive/10 text-destructive text-sm mb-4">
+                                        {mermaidError}
+                                    </div>
+                                )}
+                                {mermaidSvg && (
+                                    <div
+                                        ref={mermaidRef}
+                                        className="overflow-auto rounded-lg border bg-white p-6 min-h-[300px]"
+                                        style={{ maxHeight: '700px' }}
+                                        dangerouslySetInnerHTML={{ __html: mermaidSvg }}
+                                    />
+                                )}
+                            </CardContent>
+                        </Card>
+                    </motion.div>
                 )}
 
                 {/* Generated Plan */}

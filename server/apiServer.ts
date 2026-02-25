@@ -21,6 +21,7 @@ interface ApiKeys {
     JUDGE0_API_KEY: string;
     JUDGE0_API_HOST: string;
     JUDGE0_BASE_URL: string;
+    GROQ_API_KEY: string;
 }
 
 // ==================== RATE LIMITING ====================
@@ -218,6 +219,57 @@ async function callGeminiImage(apiKey: string, prompt: string): Promise<{ succes
     }
 }
 
+// ==================== GROQ API (Mermaid Roadmap) ====================
+async function callGroq(apiKey: string, prompt: string): Promise<{ success: boolean; content?: string; error?: string }> {
+    try {
+        const rate = checkAndRecordRate('groq', 5, 60);
+        if (!rate.ok) return { success: false, error: rate.error };
+
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+                model: 'llama-3.3-70b-versatile',
+                messages: [
+                    { role: 'system', content: 'You are a career roadmap expert. Generate ONLY valid Mermaid.js flowchart code with subgraph groupings. No explanations, no markdown backticks, just the raw Mermaid code starting with graph TD. Use subgraph blocks for phases. Never use colons in labels.' },
+                    { role: 'user', content: prompt },
+                ],
+                temperature: 0.1,
+                max_tokens: 4096,
+            }),
+        });
+
+        if (!response.ok) {
+            const errText = await response.text();
+            console.error('Groq API error:', response.status, errText);
+            return { success: false, error: `Groq API error: ${response.status}` };
+        }
+
+        const data = await response.json();
+        let content = data.choices?.[0]?.message?.content?.trim() || '';
+
+        // Clean up: strip markdown code fences if present
+        content = content.replace(/```mermaid\s*/gi, '').replace(/```\s*/g, '').trim();
+        // Ensure it starts with graph TD
+        const graphIdx = content.indexOf('graph TD');
+        if (graphIdx > 0) content = content.substring(graphIdx);
+        if (!content.startsWith('graph TD')) {
+            return { success: false, error: 'Invalid Mermaid code generated' };
+        }
+
+        // Sanitize: remove colons inside square-bracket labels (common LLM mistake)
+        content = content.replace(/\[([^\]]*):([^\]]*)\]/g, (_, a, b) => `[${a} - ${b}]`);
+
+        return { success: true, content };
+    } catch (err: any) {
+        console.error('Groq call failed:', err);
+        return { success: false, error: err.message || 'Groq call failed' };
+    }
+}
+
 async function fetchYouTubeVideos(apiKey: string, query: string, maxResults = 3): Promise<any[]> {
     try {
         const rate = checkAndRecordRate('youtube', 5, 90);
@@ -356,6 +408,7 @@ export function vidyaMitraApiPlugin(): Plugin {
                 JUDGE0_API_KEY: env.VITE_JUDGE0_API_KEY || '',
                 JUDGE0_API_HOST: env.VITE_JUDGE0_API_HOST || 'judge029.p.rapidapi.com',
                 JUDGE0_BASE_URL: env.VITE_JUDGE0_BASE_URL || 'https://judge029.p.rapidapi.com',
+                GROQ_API_KEY: env.GROQ_API_KEY || '',
             };
 
             // Initialize DB
@@ -367,6 +420,7 @@ export function vidyaMitraApiPlugin(): Plugin {
             console.log('  Pexels:', keys.PEXELS_API_KEY ? '✅' : '❌');
             console.log('  News:', keys.NEWS_API_KEY ? '✅' : '❌');
             console.log('  Exchange:', keys.EXCHANGE_RATE_API_KEY ? '✅' : '❌');
+            console.log('  Groq:', keys.GROQ_API_KEY ? '✅' : '❌');
         },
 
         configureServer(server: ViteDevServer) {
@@ -857,6 +911,86 @@ Return ONLY valid JSON.`;
                     return sendJson(res, 200, { plans });
                 }
                 next();
+            });
+
+            // ==================== ROADMAP CHART (Groq + Mermaid) ====================
+            server.middlewares.use('/api/roadmap-chart', async (req: any, res: any, next: any) => {
+                const session = getSession(req);
+                if (!session) return sendJson(res, 401, { error: 'Not authenticated' });
+
+                if (req.method !== 'POST') return next();
+
+                try {
+                    const { targetRole, timeline, currentSkills, skillsToLearn, notes } = await parseBody(req);
+                    if (!targetRole) return sendJson(res, 400, { error: 'Target role is required' });
+
+                    if (!keys.GROQ_API_KEY) {
+                        return sendJson(res, 500, { error: 'Groq API key not configured' });
+                    }
+
+                    const timelineText = timeline || '3 months';
+                    const currentSkillsText = currentSkills || 'None specified';
+                    const skillsToLearnText = skillsToLearn || targetRole;
+                    const notesText = notes ? `\nAdditional notes: ${notes}` : '';
+
+                    const prompt = `Create a career learning roadmap flowchart for someone who wants to become a "${targetRole}" within ${timelineText}.
+
+Current skills: ${currentSkillsText}
+Skills to learn: ${skillsToLearnText}${notesText}
+
+Generate ONLY valid Mermaid.js flowchart code following these STRICT rules:
+
+1. Start with exactly "graph TD" on the first line
+2. Use subgraph blocks to group skills by phase/month. Label each subgraph by the phase name.
+   Example: subgraph Phase1[Month 1 Fundamentals]
+3. Use ONLY alphanumeric characters and underscores for node IDs (e.g., A1, B2, Step1)
+4. Use square brackets for node labels: A1[Label Text Here]
+5. Use --> for connections between nodes
+6. NEVER use colons inside node labels
+7. NEVER use quotes or parentheses in labels
+8. Keep labels short - maximum 4 words per label
+9. Create a WIDE layout - each subgraph should have 2-3 parallel vertical branches side by side
+10. Connect the branches within each subgraph vertically (top to bottom)
+11. Connect the last nodes of one subgraph to the first nodes of the next subgraph
+12. Use style lines at the end with different colors for each phase
+13. Create 15-25 nodes across ${timelineText === '1 month' ? '2 phases' : timelineText === '3 months' ? '3 phases' : '4-6 phases'}
+14. End with a single final goal node that all paths converge to
+
+Example format:
+graph TD
+    subgraph Phase1[Month 1 Fundamentals]
+        A1[Learn Basics] --> A2[Core Concepts]
+        A2 --> A3[Practice Skills]
+        B1[Setup Tools] --> B2[Read Docs]
+        B2 --> B3[Build Demo]
+    end
+    subgraph Phase2[Month 2 Advanced]
+        C1[Advanced Topics] --> C2[Deep Dive]
+        C2 --> C3[Build Projects]
+        D1[Testing] --> D2[Optimization]
+        D2 --> D3[Deploy Apps]
+    end
+    A3 --> C1
+    B3 --> D1
+    C3 --> E1[Final Goal]
+    D3 --> E1
+    style A1 fill:#4CAF50,color:#fff
+    style B1 fill:#4CAF50,color:#fff
+    style C1 fill:#2196F3,color:#fff
+    style D1 fill:#2196F3,color:#fff
+    style E1 fill:#FF9800,color:#fff
+
+Generate the Mermaid code now for the ${targetRole} roadmap:`;
+
+                    const result = await callGroq(keys.GROQ_API_KEY, prompt);
+                    if (!result.success) {
+                        return sendJson(res, 500, { error: result.error || 'Failed to generate roadmap chart' });
+                    }
+
+                    sendJson(res, 200, { success: true, mermaidCode: result.content });
+                } catch (err: any) {
+                    sendJson(res, 500, { error: err.message });
+                }
             });
 
             // ==================== RESUME BUILDER ====================

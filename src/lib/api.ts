@@ -169,6 +169,12 @@ export const careerPlanApi = {
     getAll: () => apiFetch('/api/career-plan'),
 };
 
+// ==================== ROADMAP CHART (Groq + Mermaid) ====================
+export const roadmapChartApi = {
+    generate: (params: { targetRole: string; timeline?: string; currentSkills?: string; skillsToLearn?: string; notes?: string }) =>
+        apiFetch('/api/roadmap-chart', { method: 'POST', body: JSON.stringify(params) }),
+};
+
 // ==================== RESUME BUILDER ====================
 export const resumeBuilderApi = {
     save: (data: any) =>
